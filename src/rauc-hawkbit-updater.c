@@ -14,6 +14,9 @@
 #include "hawkbit-client.h"
 #include "config-file.h"
 #include "log.h"
+#ifdef WITH_SYSTEMD
+#include "sd-helper.h"
+#endif
 
 #define PROGRAM "rauc-hawkbit-updater"
 #define VERSION PROJECT_VERSION
@@ -87,6 +90,10 @@ static gboolean on_rauc_install_complete_cb(gpointer data)
         // notify hawkbit about install result
         notify_hawkbit_install_complete(&userdata);
 
+#ifdef WITH_SYSTEMD
+        sd_notify(0, "READY=1\nUPDATE=COMPLETE\nSTATUS=Installation complete");
+#endif
+
         return G_SOURCE_REMOVE;
 }
 
@@ -105,6 +112,11 @@ static gboolean on_new_software_ready_cb(gpointer data)
 
         notify_hawkbit_install_progress = userdata->install_progress_callback;
         notify_hawkbit_install_complete = userdata->install_complete_callback;
+
+#ifdef WITH_SYSTEMD
+        sd_notify(0, "READY=1\nUPDATE=INSTALLING\nSTATUS=Installation running");
+#endif
+
         userdata->install_success = rauc_install(userdata->file, userdata->auth_header,
                                                  userdata->ssl_verify,
                                                  on_rauc_install_progress_cb,

@@ -32,6 +32,7 @@
 #include "json-helper.h"
 #ifdef WITH_SYSTEMD
 #include "sd-helper.h"
+#include <systemd/sd-daemon.h>
 #endif
 
 #include "hawkbit-client.h"
@@ -860,6 +861,10 @@ static gpointer download_thread(gpointer data)
 
         g_message("Start downloading: %s", artifact->download_url);
 
+#ifdef WITH_SYSTEMD
+        sd_notify(0, "READY=1\nUPDATE=DOWNLOADING\nSTATUS=Installation running");
+#endif
+
         while (1) {
                 gboolean resumable = FALSE;
                 GStatBuf bundle_stat;
@@ -904,6 +909,10 @@ static gpointer download_thread(gpointer data)
                 g_clear_error(&error);
         }
         g_mutex_unlock(&active_action->mutex);
+
+#ifdef WITH_SYSTEMD
+        sd_notify(0, "READY=1\nUPDATE=DOWNLOADED\nSTATUS=Installation running");
+#endif
 
         // validate checksum
         if (g_strcmp0(artifact->sha1, sha1sum)) {
@@ -1180,6 +1189,10 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
 
         g_message("New software ready for download (Name: %s, Version: %s, Size: %" G_GINT64_FORMAT " bytes, URL: %s)",
                   artifact->name, artifact->version, artifact->size, artifact->download_url);
+
+#ifdef WITH_SYSTEMD
+        sd_notify(0, "READY=1\nUPDATE=READY\nSTATUS=Installation running");
+#endif
 
         // stream_bundle path exits early
         if (hawkbit_config->stream_bundle)
