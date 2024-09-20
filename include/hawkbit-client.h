@@ -123,6 +123,8 @@ struct on_install_complete_userdata {
  */
 void hawkbit_init(Config *config, GSourceFunc on_install_ready);
 
+gint64 hawkbit_get_bundle_size(GError **error);
+
 /**
  * @brief Sets up timeout and event sources, initializes and runs main loop.
  *
