@@ -27,6 +27,7 @@ static gboolean opt_version        = FALSE;
 static gboolean opt_debug          = FALSE;
 static gboolean opt_run_once       = FALSE;
 static gboolean opt_output_systemd = FALSE;
+static gboolean opt_get_bundle_size = FALSE;
 
 // Commandline options
 static GOptionEntry entries[] =
@@ -35,6 +36,8 @@ static GOptionEntry entries[] =
         { "version",          'v', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_version,           "Version information",                      NULL },
         { "debug",            'd', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_debug,             "Enable debug output",                      NULL },
         { "run-once",         'r', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_run_once,          "Check and install new software and exit",  NULL },
+        { "get-bundle-size",  'g', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, &opt_get_bundle_size,        "Obtener solo el tamaño del paquete bundle",NULL },
+        
 #ifdef WITH_SYSTEMD
         { "output-systemd",   's', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_output_systemd,    "Enable output to systemd",                 NULL },
 #endif
@@ -174,6 +177,19 @@ int main(int argc, char **argv)
 
         setup_logging(PROGRAM, log_level, opt_output_systemd);
         hawkbit_init(config, on_new_software_ready_cb);
+
+        if (opt_get_bundle_size) {
+                GError *bundle_size_error = NULL;
+                gint64 bundle_size = hawkbit_get_bundle_size(&bundle_size_error);
+                if (bundle_size >= 0) {
+                        g_print("Size bundle package: %" G_GINT64_FORMAT " bytes\n", bundle_size);
+                        return 0;
+                } else {
+                        g_printerr("Error: %s\n", bundle_size_error->message);
+                        g_error_free(bundle_size_error);
+                        return 1;
+                }
+        }
 
         return hawkbit_start_service_sync();
 }

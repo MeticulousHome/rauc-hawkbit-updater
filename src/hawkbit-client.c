@@ -1523,3 +1523,40 @@ void rest_payload_free(RestPayload *payload)
         g_free(payload->payload);
         g_free(payload);
 }
+
+gint64 hawkbit_get_bundle_size(GError **error)
+{
+    g_autofree gchar *get_tasks_url = NULL;
+    g_autoptr(JsonParser) json_response_parser = NULL;
+    JsonNode *json_root = NULL;
+    gint64 bundle_size = -1;
+
+    g_return_val_if_fail(error == NULL || *error == NULL, -1);
+
+    get_tasks_url = build_api_url(NULL);
+
+    if (!rest_request(GET, get_tasks_url, NULL, &json_response_parser, error))
+        return -1;
+
+    json_root = json_parser_get_root(json_response_parser);
+
+    if (json_contains(json_root, "$._links.deploymentBase")) {
+        g_autofree gchar *deployment_url = NULL;
+        g_autoptr(JsonParser) deployment_parser = NULL;
+        JsonNode *deployment_root = NULL;
+
+        deployment_url = json_get_string(json_root, "$._links.deploymentBase.href", error);
+        if (!deployment_url)
+            return -1;
+
+        if (!rest_request(GET, deployment_url, NULL, &deployment_parser, error))
+            return -1;
+
+        deployment_root = json_parser_get_root(deployment_parser);
+        bundle_size = json_get_int(deployment_root, "$.deployment.chunks[0].artifacts[0].size", error);
+    } else {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No new deployment is currently available");
+    }
+
+    return bundle_size;
+}
