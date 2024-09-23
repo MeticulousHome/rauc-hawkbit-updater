@@ -36,7 +36,7 @@ static GOptionEntry entries[] =
         { "version",          'v', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_version,           "Version information",                      NULL },
         { "debug",            'd', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_debug,             "Enable debug output",                      NULL },
         { "run-once",         'r', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_run_once,          "Check and install new software and exit",  NULL },
-        { "get-bundle-size",  'g', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, &opt_get_bundle_size,        "Obtener solo el tamaño del paquete bundle",NULL },
+        { "get-bundle-size",  'g', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, &opt_get_bundle_size,       "Get the size of the bundle package",       NULL },
         
 #ifdef WITH_SYSTEMD
         { "output-systemd",   's', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE,     &opt_output_systemd,    "Enable output to systemd",                 NULL },
