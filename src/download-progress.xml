@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<node>
+  <interface name="org.hawkbit.DownloadProgress">
+    <signal name="ProgressUpdate">
+      <arg name="percentage" type="d"/>
+    </signal>
+  </interface>
+</node>

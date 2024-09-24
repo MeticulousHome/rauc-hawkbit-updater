@@ -19,6 +19,26 @@ jsonglibdep = dependency('json-glib-1.0')
 
 incdir = include_directories('include')
 
+gnome = import('gnome')
+
+gdbus_codegen = find_program('gdbus-codegen')
+
+download_progress_dbus = custom_target(
+  'download-progress-dbus',
+  input : 'src/download-progress.xml',
+  output : ['download-progress-dbus.c', 'download-progress-dbus.h'],
+  command : [
+    gdbus_codegen,
+    '--interface-prefix=org.hawkbit.',
+    '--generate-c-code=download-progress-dbus',
+    '--c-namespace=DownloadProgress',
+    '@INPUT@'
+  ],
+  build_by_default: true
+)
+
+message('download_progress_dbus output: @0@'.format(download_progress_dbus))
+
 sources_updater = [
   'src/rauc-hawkbit-updater.c',
   'src/rauc-installer.c',
@@ -93,6 +113,7 @@ subdir('docs')
 executable('rauc-hawkbit-updater',
   sources_updater,
   dbus_sources,
+  download_progress_dbus,
   config_h,
   dependencies : [libcurldep, giodep, giounixdep, jsonglibdep, libsystemddep],
   include_directories : incdir,

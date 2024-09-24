@@ -28,6 +28,7 @@
 #include <libgen.h>
 #include <gio/gio.h>
 #include <sys/reboot.h>
+#include <math.h>
 
 #include "json-helper.h"
 #ifdef WITH_SYSTEMD
@@ -36,6 +37,10 @@
 #endif
 
 #include "hawkbit-client.h"
+#include "download-progress-dbus.h"
+
+static GDBusConnection *dbus_connection = NULL;
+static DownloadProgressDownloadProgress *dbus_interface = NULL;
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(FILE, fclose)
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(CURL, curl_easy_cleanup)
@@ -84,6 +89,64 @@ GQuark rhu_hawkbit_client_curl_error_quark(void)
 GQuark rhu_hawkbit_client_http_error_quark(void)
 {
         return g_quark_from_static_string("rhu_hawkbit_client_http_error_quark");
+}
+
+struct progress{
+        GDBusConnection *connection;
+        gchar *object_path;
+};
+
+static size_t progress_callback(void *clientp,
+                                curl_off_t dltotal,
+                                curl_off_t dlnow,
+                                curl_off_t ultotal,
+                                curl_off_t ulnow)
+{
+        static double last_percentage = 0;
+        double percentage = (dltotal > 0) ? ((double)dlnow / (double)dltotal) * 100 : 0;
+
+        if (fabs(percentage - last_percentage) >= 1.0) {
+                if (dbus_interface) {
+                        download_progress_download_progress_emit_progress_update(dbus_interface, percentage);
+                }
+                g_print("Download progress: %.1f%%\n", percentage);
+        
+                last_percentage = percentage;
+        }
+
+        return 0;
+}
+
+static void on_bus_acquired(GDBusConnection *connection,
+                            const gchar     *name,
+                            gpointer         user_data)
+{
+    GError *error = NULL;
+
+    g_print("D-Bus connection acquired\n");
+
+    dbus_connection = connection;
+    dbus_interface = download_progress_download_progress_skeleton_new();
+
+    if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(dbus_interface),
+                                          connection,
+                                          "/org/hawkbit/DownloadProgress",
+                                          &error)) {
+        g_warning("Error exporting object: %s\n", error->message);
+        g_error_free(error);
+    }
+}
+
+static void init_dbus_service(void)
+{
+    g_bus_own_name(G_BUS_TYPE_SYSTEM,
+                   "org.hawkbit.DownloadProgress",
+                   G_BUS_NAME_OWNER_FLAGS_NONE,
+                   on_bus_acquired,
+                   NULL,
+                   NULL,
+                   NULL,
+                   NULL);
 }
 
 /**
@@ -278,6 +341,13 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         CURLcode curl_code;
         glong http_code = 0;
         struct curl_slist *headers = NULL;
+        struct progress prog;
+
+        prog.connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, error);
+        if(prog.connection == NULL){
+                return FALSE;
+        }
+        prog.object_path = "/org/hawkbit/DownloadProgress";
 
         g_return_val_if_fail(download_url, FALSE);
         g_return_val_if_fail(file, FALSE);
@@ -308,6 +378,10 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 8L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
         // abort if slower than configured download rate during configured time span
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, hawkbit_config->low_speed_time);
@@ -346,6 +420,7 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         if (sha1sum && !get_file_checksum(fp, G_CHECKSUM_SHA1, sha1sum, error))
                 return FALSE;
 
+        g_object_unref(prog.connection);
         return TRUE;
 }
 
@@ -1324,11 +1399,24 @@ static gboolean process_cancel(JsonNode *req_root, GError **error)
 
 void hawkbit_init(Config *config, GSourceFunc on_install_ready)
 {
+        GError *error = NULL;
+        GDBusConnection *connection = NULL;
         g_return_if_fail(config);
 
         hawkbit_config = config;
         software_ready_cb = on_install_ready;
         curl_global_init(CURL_GLOBAL_ALL);
+
+        init_dbus_service();
+
+        connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+        if (connection == NULL) {
+                g_print("Failed to connect to D-Bus: %s\n", error->message);
+                g_error_free(error);
+        } else {
+                on_bus_acquired(connection, "org.hawkbit.DownloadProgress", NULL);
+                g_object_unref(connection);
+        }
 }
 
 typedef struct ClientData_ {
@@ -1522,41 +1610,4 @@ void rest_payload_free(RestPayload *payload)
 
         g_free(payload->payload);
         g_free(payload);
-}
-
-gint64 hawkbit_get_bundle_size(GError **error)
-{
-    g_autofree gchar *get_tasks_url = NULL;
-    g_autoptr(JsonParser) json_response_parser = NULL;
-    JsonNode *json_root = NULL;
-    gint64 bundle_size = -1;
-
-    g_return_val_if_fail(error == NULL || *error == NULL, -1);
-
-    get_tasks_url = build_api_url(NULL);
-
-    if (!rest_request(GET, get_tasks_url, NULL, &json_response_parser, error))
-        return -1;
-
-    json_root = json_parser_get_root(json_response_parser);
-
-    if (json_contains(json_root, "$._links.deploymentBase")) {
-        g_autofree gchar *deployment_url = NULL;
-        g_autoptr(JsonParser) deployment_parser = NULL;
-        JsonNode *deployment_root = NULL;
-
-        deployment_url = json_get_string(json_root, "$._links.deploymentBase.href", error);
-        if (!deployment_url)
-            return -1;
-
-        if (!rest_request(GET, deployment_url, NULL, &deployment_parser, error))
-            return -1;
-
-        deployment_root = json_parser_get_root(deployment_parser);
-        bundle_size = json_get_int(deployment_root, "$.deployment.chunks[0].artifacts[0].size", error);
-    } else {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No new deployment is currently available");
-    }
-
-    return bundle_size;
 }
