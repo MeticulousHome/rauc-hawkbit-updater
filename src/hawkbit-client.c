@@ -76,6 +76,8 @@ static GSourceFunc software_ready_cb;
 static struct HawkbitAction *active_action = NULL;
 static GThread *thread_download = NULL;
 
+static void process_deployment_cleanup(void);
+
 GQuark rhu_hawkbit_client_error_quark(void)
 {
         return g_quark_from_static_string("rhu_hawkbit_client_error_quark");
@@ -204,8 +206,13 @@ static gboolean get_available_space(const char *path, goffset *free_space, GErro
  * @return TRUE if checksum calculation succeeded, FALSE otherwise (error set)
  */
 static gboolean get_file_checksum(FILE *fp, const GChecksumType type, gchar **checksum,
-                                  gsize max_bytes, GError **error)
+                                  gsize max_bytes, gsize max_bytes, GError **error)
 {
+    g_autoptr(GChecksum) ctx = g_checksum_new(type);
+    guchar buf[4096];
+    size_t r;
+    gsize bytes_read = 0;
+    long initial_position;
     g_autoptr(GChecksum) ctx = g_checksum_new(type);
     guchar buf[4096];
     size_t r;
@@ -215,9 +222,33 @@ static gboolean get_file_checksum(FILE *fp, const GChecksumType type, gchar **ch
     g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
     g_return_val_if_fail(fp, FALSE);
     g_return_val_if_fail(checksum && *checksum == NULL, FALSE);
+    g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+    g_return_val_if_fail(fp, FALSE);
+    g_return_val_if_fail(checksum && *checksum == NULL, FALSE);
 
     g_assert_nonnull(ctx);
+    g_assert_nonnull(ctx);
 
+    // Save the initial file position
+    initial_position = ftell(fp);
+    if (initial_position < 0) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "Failed to get file position: %s", g_strerror(errno));
+        return FALSE;
+    }
+
+    g_debug("Calculating checksum from position %ld, max_bytes: %zu", initial_position, max_bytes);
+
+    while (bytes_read < max_bytes) {
+        size_t to_read = MIN(sizeof(buf), max_bytes - bytes_read);
+        r = fread(buf, 1, to_read, fp);
+        if (ferror(fp)) {
+            g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "Read failed: %s", g_strerror(errno));
+            // Try to restore the original file position
+            if (fseek(fp, initial_position, SEEK_SET) != 0) {
+                g_warning("Failed to restore file position after read error: %s", g_strerror(errno));
+            }
+            return FALSE;
+        }
     // Save the initial file position
     initial_position = ftell(fp);
     if (initial_position < 0) {
@@ -241,7 +272,12 @@ static gboolean get_file_checksum(FILE *fp, const GChecksumType type, gchar **ch
 
         g_checksum_update(ctx, buf, r);
         bytes_read += r;
+        g_checksum_update(ctx, buf, r);
+        bytes_read += r;
 
+        if (feof(fp))
+            break;
+    }
         if (feof(fp))
             break;
     }
@@ -255,9 +291,20 @@ static gboolean get_file_checksum(FILE *fp, const GChecksumType type, gchar **ch
         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "Failed to restore file position: %s", g_strerror(errno));
         return FALSE;
     }
+    *checksum = g_strdup(g_checksum_get_string(ctx));
+
+    g_debug("Checksum calculated. Bytes read: %zu, Checksum: %s", bytes_read, *checksum);
+
+    // Restore the original file position
+    if (fseek(fp, initial_position, SEEK_SET) != 0) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "Failed to restore file position: %s", g_strerror(errno));
+        return FALSE;
+    }
 
     return TRUE;
+    return TRUE;
 }
+
 
 
 /**
@@ -359,13 +406,17 @@ static void set_default_curl_opts(CURL *curl)
  */
 static gboolean get_binary(const gchar *download_url, const gchar *file, curl_off_t resume_from,
                            const gchar *expected_sha1sum, gchar **calculated_sha1sum, curl_off_t *speed, GError **error)
+                           const gchar *expected_sha1sum, gchar **calculated_sha1sum, curl_off_t *speed, GError **error)
 {
         g_autoptr(CURL) curl = NULL;
+        FILE *fp = NULL;
         FILE *fp = NULL;
         CURLcode curl_code;
         glong http_code = 0;
         struct curl_slist *headers = NULL;
         struct progress prog;
+        g_autofree gchar *partial_sha1sum = NULL;
+        gsize file_size = 0;
         g_autofree gchar *partial_sha1sum = NULL;
         gsize file_size = 0;
 
@@ -378,10 +429,43 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         g_return_val_if_fail(download_url, FALSE);
         g_return_val_if_fail(file, FALSE);
         g_return_val_if_fail(calculated_sha1sum && *calculated_sha1sum == NULL, FALSE);
+        g_return_val_if_fail(calculated_sha1sum && *calculated_sha1sum == NULL, FALSE);
         g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
 
         if (resume_from)
                 g_debug("Resuming download from offset %" CURL_FORMAT_CURL_OFF_T, resume_from);
+
+        // Check if file exists and calculate its partial checksum
+        if (g_file_test(file, G_FILE_TEST_EXISTS)) {
+                fp = g_fopen(file, "a+b");
+                if (fp) {
+                        fseek(fp, 0, SEEK_END);
+                        file_size = ftell(fp);
+                        fseek(fp, 0, SEEK_SET);
+                        if (file_size > 0) {
+                                g_debug("Calculating partial checksum for existing file");
+                                if (get_file_checksum(fp, G_CHECKSUM_SHA1, &partial_sha1sum, file_size, error)) {
+                                        resume_from = file_size;
+                                        g_debug("Partial checksum calculated. Size: %" G_GSIZE_FORMAT " bytes, Checksum: %s", file_size, partial_sha1sum);
+                
+                                        // Agregar este log para imprimir el checksum parcial
+                                        g_debug("Partial SHA1 checksum: %s", partial_sha1sum);
+                
+                                } else {
+                                        g_warning("Failed to calculate partial checksum: %s", (*error)->message);
+                                        g_clear_error(error);
+                                        fclose(fp);
+                                        fp = NULL;
+                                }
+                        } else {
+                                g_debug("Existing file is empty. Starting new download.");
+                                fclose(fp);
+                                fp = NULL;
+                        }
+                } else {
+                        g_warning("Failed to open existing file for checksum calculation: %s", g_strerror(errno));
+                }
+        }
 
         // Check if file exists and calculate its partial checksum
         if (g_file_test(file, G_FILE_TEST_EXISTS)) {
@@ -435,6 +519,25 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
                         return FALSE;
                 }
                 g_debug("File pointer set to resume position: %" CURL_FORMAT_CURL_OFF_T, resume_from);
+                g_debug("Opening file for writing: %s", file);
+                fp = g_fopen(file, "wb");
+                if (!fp) {
+                        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                                    "Failed to open %s for download: %s", file, g_strerror(errno));
+                        return FALSE;
+                }
+                resume_from = 0;
+        }
+
+        if (resume_from > 0) {
+                if (fseek(fp, resume_from, SEEK_SET) != 0) {
+                        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                                "Failed to seek to position %" CURL_FORMAT_CURL_OFF_T ": %s", 
+                                resume_from, g_strerror(errno));
+                        fclose(fp);
+                        return FALSE;
+                }
+                g_debug("File pointer set to resume position: %" CURL_FORMAT_CURL_OFF_T, resume_from);
         }
 
         curl = curl_easy_init();
@@ -442,10 +545,17 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
                 g_set_error(error, RHU_HAWKBIT_CLIENT_CURL_ERROR, CURLE_FAILED_INIT,
                             "Unable to start libcurl easy session");
                 fclose(fp);
+                fclose(fp);
                 return FALSE;
         }
 
         set_default_curl_opts(curl);
+
+        if (resume_from > 0) {
+                curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, resume_from);
+                g_debug("Setting CURLOPT_RESUME_FROM_LARGE to %" CURL_FORMAT_CURL_OFF_T, resume_from);
+        }
+
 
         if (resume_from > 0) {
                 curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, resume_from);
@@ -460,6 +570,7 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &prog);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &prog);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, hawkbit_config->low_speed_time);
@@ -467,20 +578,31 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         if (!set_auth_curl_header(&headers, error)) {
                 fclose(fp);
+        if (!set_auth_curl_header(&headers, error)) {
+                fclose(fp);
                 return FALSE;
+        }
         }
 
         if (!add_curl_header(&headers, "Accept: application/octet-stream", error)) {
                 fclose(fp);
+        if (!add_curl_header(&headers, "Accept: application/octet-stream", error)) {
+                fclose(fp);
                 return FALSE;
+        }
         }
 
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         g_debug("Starting download from %s", download_url);
+        g_debug("Starting download from %s", download_url);
         curl_code = curl_easy_perform(curl);
 
         if (curl_code != CURLE_OK) {
+                g_set_error(error, RHU_HAWKBIT_CLIENT_CURL_ERROR, curl_code,
+                "Download failed: %s", curl_easy_strerror(curl_code));
+                fclose(fp);
+                curl_slist_free_all(headers);
                 g_set_error(error, RHU_HAWKBIT_CLIENT_CURL_ERROR, curl_code,
                 "Download failed: %s", curl_easy_strerror(curl_code));
                 fclose(fp);
@@ -492,13 +614,31 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD_T, speed);
         curl_slist_free_all(headers);
 
+
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD_T, speed);
+        curl_slist_free_all(headers);
+
         if (http_code != 200 && http_code != 206 && http_code != 416) {
                 g_set_error(error, RHU_HAWKBIT_CLIENT_HTTP_ERROR, http_code,
+                "HTTP request failed: %ld", http_code);
+                fclose(fp);
                 "HTTP request failed: %ld", http_code);
                 fclose(fp);
                 return FALSE;
         }
 
+        // Close the file after download
+        fclose(fp);
+        fp = NULL;
+
+        g_debug("Download completed. Opening file for checksum calculation.");
+
+        // Reopen the file for checksum calculation
+        fp = g_fopen(file, "rb");
+        if (!fp) {
+                g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                "Failed to open %s for checksum calculation: %s", file, g_strerror(errno));
         // Close the file after download
         fclose(fp);
         fp = NULL;
@@ -523,6 +663,7 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         // Calculate checksum for the entire file
         if (!get_file_checksum(fp, G_CHECKSUM_SHA1, calculated_sha1sum, file_size, error)) {
                 fclose(fp);
+                process_deployment_cleanup();
                 return FALSE;
         }
 
@@ -530,8 +671,9 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         if (expected_sha1sum && g_strcmp0(*calculated_sha1sum, expected_sha1sum) != 0) {
                 g_set_error(error, RHU_HAWKBIT_CLIENT_ERROR, RHU_HAWKBIT_CLIENT_ERROR_CHECKSUM,
-                "Checksum mismatch. Expected: %s, Calculated: %s",
-                expected_sha1sum, *calculated_sha1sum);
+                        "Checksum mismatch. Expected: %s, Calculated: %s",
+                        expected_sha1sum, *calculated_sha1sum);
+                process_deployment_cleanup();
                 return FALSE;
         }
 
@@ -1038,6 +1180,8 @@ static gpointer download_thread(gpointer data)
         g_autoptr(GError) error = NULL, feedback_error = NULL;
         g_autofree gchar *msg = NULL;
         g_autofree gchar *calculated_sha1sum = NULL;
+        g_autofree gchar *msg = NULL;
+        g_autofree gchar *calculated_sha1sum = NULL;
         g_autoptr(Artifact) artifact = data;
         curl_off_t speed;
 
@@ -1065,6 +1209,7 @@ static gpointer download_thread(gpointer data)
                 curl_off_t resume_from = 0;
 
                 g_clear_pointer(&calculated_sha1sum, g_free);
+                g_clear_pointer(&calculated_sha1sum, g_free);
 
                 // Download software bundle (artifact)
                 if (g_stat(hawkbit_config->bundle_download_location, &bundle_stat) == 0) {
@@ -1079,7 +1224,20 @@ static gpointer download_thread(gpointer data)
                         g_debug("No existing file found at download location. Starting new download.");
                         resume_from = 0;
                 }
+                if (g_stat(hawkbit_config->bundle_download_location, &bundle_stat) == 0) {
+                        if (bundle_stat.st_size > 0) {
+                                resume_from = (curl_off_t) bundle_stat.st_size;
+                                g_debug("Existing partial download found. Size: %" CURL_FORMAT_CURL_OFF_T " bytes", resume_from);
+                        } else {
+                        g_debug("Empty file found at download location. Starting new download.");
+                        resume_from = 0;
+                        }
+                } else {
+                        g_debug("No existing file found at download location. Starting new download.");
+                        resume_from = 0;
+                }
                 if (get_binary(artifact->download_url, hawkbit_config->bundle_download_location,
+                               resume_from, artifact->sha1, &calculated_sha1sum, &speed, &error))
                                resume_from, artifact->sha1, &calculated_sha1sum, &speed, &error))
                         break;
 
@@ -1119,8 +1277,10 @@ static gpointer download_thread(gpointer data)
 
         // validate checksum
         if (g_strcmp0(artifact->sha1, calculated_sha1sum)) {
+        if (g_strcmp0(artifact->sha1, calculated_sha1sum)) {
                 g_set_error(&error, RHU_HAWKBIT_CLIENT_ERROR, RHU_HAWKBIT_CLIENT_ERROR_DOWNLOAD,
                             "Software: %s V%s. Invalid checksum: %s expected %s", artifact->name,
+                            artifact->version, calculated_sha1sum, artifact->sha1);
                             artifact->version, calculated_sha1sum, artifact->sha1);
                 goto report_err;
         }
@@ -1179,6 +1339,7 @@ cancel:
         if (active_action->state == ACTION_STATE_CANCEL_REQUESTED)
                 active_action->state = ACTION_STATE_CANCELED;
 
+        //process_deployment_cleanup();
         //process_deployment_cleanup();
 
         g_cond_signal(&active_action->cond);
@@ -1327,6 +1488,8 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
         if (g_strcmp0(temp_id, active_action->id))
                 g_debug("Changed deployment id");
                 //process_deployment_cleanup();
+                g_debug("Changed deployment id");
+                //process_deployment_cleanup();
         else
                 g_debug("Continuing scheduled deployment %s%s.", active_action->id,
                         maintenance_msg);
@@ -1447,6 +1610,39 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
         // Start new download thread
         g_debug("Starting new download thread");
         active_action->state = ACTION_STATE_DOWNLOADING;
+        // Check if a download is already in progress
+        if (thread_download) {
+                g_debug("Download thread already exists.");
+                if (active_action->state == ACTION_STATE_DOWNLOADING) {
+                        g_debug("Download is still in progress. Not starting a new one.");
+                        return TRUE;
+                } else {
+                        g_debug("Previous download thread has finished. Cleaning up.");
+                        g_thread_join(thread_download);
+                        thread_download = NULL;
+                }
+        }
+
+        // Check if the file already exists and is complete
+        {
+                GStatBuf file_stat;
+                if (g_stat(hawkbit_config->bundle_download_location, &file_stat) == 0) {
+                        if (file_stat.st_size == artifact->size) {
+                                g_debug("File already fully downloaded. Skipping download.");
+                                // Here you might want to verify the checksum of the existing file
+                                // If checksum is valid, you can proceed to installation
+                                // If not, you should delete the file and start a new download
+                                return TRUE;
+                        } else if (file_stat.st_size > 0) {
+                                g_debug("Partial download found. Will resume from byte %" G_GOFFSET_FORMAT, 
+                                        (goffset)file_stat.st_size);
+                        }
+                }
+        }
+
+        // Start new download thread
+        g_debug("Starting new download thread");
+        active_action->state = ACTION_STATE_DOWNLOADING;
         thread_download = g_thread_new("downloader", download_thread,
                                        (gpointer) g_steal_pointer(&artifact));
 
@@ -1457,6 +1653,7 @@ proc_error:
 
 error:
         // clean up failed deployment
+        //process_deployment_cleanup();
         //process_deployment_cleanup();
         active_action->state = ACTION_STATE_NONE;
         return FALSE;
@@ -1526,6 +1723,9 @@ static gboolean process_cancel(JsonNode *req_root, GError **error)
         case ACTION_STATE_CANCELED:
                 res = feedback(feedback_url, stop_id, "Action canceled.", "success", "closed",
                                error);
+                if (res) {
+                        process_deployment_cleanup();
+                }
                 break;
         case ACTION_STATE_SUCCESS:
                 g_debug("Cancelation impossible, installation succeeded already");
