@@ -385,17 +385,20 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         // Check if file exists and calculate its partial checksum
         if (g_file_test(file, G_FILE_TEST_EXISTS)) {
-                fp = g_fopen(file, "r+b");
+                fp = g_fopen(file, "a+b");
                 if (fp) {
                         fseek(fp, 0, SEEK_END);
                         file_size = ftell(fp);
                         fseek(fp, 0, SEEK_SET);
-        
                         if (file_size > 0) {
                                 g_debug("Calculating partial checksum for existing file");
                                 if (get_file_checksum(fp, G_CHECKSUM_SHA1, &partial_sha1sum, file_size, error)) {
                                         resume_from = file_size;
                                         g_debug("Partial checksum calculated. Size: %" G_GSIZE_FORMAT " bytes, Checksum: %s", file_size, partial_sha1sum);
+                
+                                        // Agregar este log para imprimir el checksum parcial
+                                        g_debug("Partial SHA1 checksum: %s", partial_sha1sum);
+                
                                 } else {
                                         g_warning("Failed to calculate partial checksum: %s", (*error)->message);
                                         g_clear_error(error);
@@ -421,6 +424,17 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
                         return FALSE;
                 }
                 resume_from = 0;
+        }
+
+        if (resume_from > 0) {
+                if (fseek(fp, resume_from, SEEK_SET) != 0) {
+                        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                                "Failed to seek to position %" CURL_FORMAT_CURL_OFF_T ": %s", 
+                                resume_from, g_strerror(errno));
+                        fclose(fp);
+                        return FALSE;
+                }
+                g_debug("File pointer set to resume position: %" CURL_FORMAT_CURL_OFF_T, resume_from);
         }
 
         curl = curl_easy_init();
@@ -468,7 +482,7 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         if (curl_code != CURLE_OK) {
                 g_set_error(error, RHU_HAWKBIT_CLIENT_CURL_ERROR, curl_code,
-                            "Download failed: %s", curl_easy_strerror(curl_code));
+                "Download failed: %s", curl_easy_strerror(curl_code));
                 fclose(fp);
                 curl_slist_free_all(headers);
                 return FALSE;
@@ -480,14 +494,34 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         if (http_code != 200 && http_code != 206 && http_code != 416) {
                 g_set_error(error, RHU_HAWKBIT_CLIENT_HTTP_ERROR, http_code,
-                            "HTTP request failed: %ld", http_code);
+                "HTTP request failed: %ld", http_code);
                 fclose(fp);
                 return FALSE;
         }
 
-        g_debug("Download completed. Calculating final checksum.");
+        // Close the file after download
+        fclose(fp);
+        fp = NULL;
+
+        g_debug("Download completed. Opening file for checksum calculation.");
+
+        // Reopen the file for checksum calculation
+        fp = g_fopen(file, "rb");
+        if (!fp) {
+                g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                "Failed to open %s for checksum calculation: %s", file, g_strerror(errno));
+                return FALSE;
+        }
+
+        // Get the file size
+        fseek(fp, 0, SEEK_END);
+        file_size = ftell(fp);
         fseek(fp, 0, SEEK_SET);
-        if (!get_file_checksum(fp, G_CHECKSUM_SHA1, calculated_sha1sum, 0, error)) {
+
+        g_debug("Calculating checksum for entire file. Size: %zu bytes", file_size);
+
+        // Calculate checksum for the entire file
+        if (!get_file_checksum(fp, G_CHECKSUM_SHA1, calculated_sha1sum, file_size, error)) {
                 fclose(fp);
                 return FALSE;
         }
@@ -496,12 +530,13 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         if (expected_sha1sum && g_strcmp0(*calculated_sha1sum, expected_sha1sum) != 0) {
                 g_set_error(error, RHU_HAWKBIT_CLIENT_ERROR, RHU_HAWKBIT_CLIENT_ERROR_CHECKSUM,
-                            "Checksum mismatch. Expected: %s, Calculated: %s", 
-                            expected_sha1sum, *calculated_sha1sum);
+                "Checksum mismatch. Expected: %s, Calculated: %s",
+                expected_sha1sum, *calculated_sha1sum);
                 return FALSE;
         }
 
         g_debug("Download and checksum verification completed successfully.");
+        g_debug("Calculated SHA1: %s", *calculated_sha1sum);
         g_object_unref(prog.connection);
         return TRUE;
 }
