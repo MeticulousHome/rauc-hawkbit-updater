@@ -488,7 +488,7 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
                                 if (get_file_checksum(fp, G_CHECKSUM_SHA1, &partial_sha1sum, file_size, error)) {
                                         resume_from = file_size;
                                         g_debug("Partial checksum calculated. Size: %" G_GSIZE_FORMAT " bytes, Checksum: %s", file_size, partial_sha1sum);
-                                        // Agregar este log para imprimir el checksum parcial
+                                        // Add this log to print the partial checksum.
                                         g_debug("Partial SHA1 checksum: %s", partial_sha1sum);
                                 } else {
                                         g_warning("Failed to calculate partial checksum: %s", (*error)->message);
