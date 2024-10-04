@@ -398,7 +398,7 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
                                         resume_from = file_size;
                                         g_debug("Partial checksum calculated. Size: %" G_GSIZE_FORMAT " bytes, Checksum: %s", file_size, partial_sha1sum);
                 
-                                        // Agregar este log para imprimir el checksum parcial
+                                        // Add this log to print the partial checksum.
                                         g_debug("Partial SHA1 checksum: %s", partial_sha1sum);
                 
                                 } else {
