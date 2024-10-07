@@ -5,6 +5,9 @@ Maintainer: Mimoja <mimoja@meticuloushome.com>
 Rules-Requires-Root: no
 Build-Depends:
  debhelper-compat (= 13),
+ meson,
+ libcurl4-openssl-dev,
+ libjson-glib-dev
 Standards-Version: 4.6.2
 Homepage: https://github.com/MeticulousHome/rauc-hawkbit-updater
 
@@ -17,7 +20,7 @@ Depends:
  ${misc:Depends},
  dbus,
  systemd,
- rauc,
+ rauc
 Description: RAUC hawkBit updater client
  The RAUC hawkBit updater is a simple commandline
  tool/daemon that runs on your target and interfaces
