@@ -1,0 +1,35 @@
+Source: rauc-hawkbit-updater
+Section: admin
+Priority: optional
+Maintainer: Mimoja <mimoja@meticuloushome.com>
+Rules-Requires-Root: no
+Build-Depends:
+ debhelper-compat (= 13),
+Standards-Version: 4.6.2
+Homepage: https://github.com/MeticulousHome/rauc-hawkbit-updater
+
+
+Package: rauc-hawkbit-updater
+Architecture: any
+Multi-Arch: foreign
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ dbus,
+ systemd,
+ rauc,
+Description: RAUC hawkBit updater client
+ The RAUC hawkBit updater is a simple commandline
+ tool/daemon that runs on your target and interfaces
+ between RAUC and hawkBit's DDI API. 
+
+
+Package: rauc-hawkbit-updater-service
+Architecture: all
+Depends:
+ ${misc:Depends},
+ rauc-hawkbit-updater,
+Description: RAUC hawkBit updater client - service
+ The RAUC hawkBit updater is a simple commandline
+ tool/daemon that runs on your target and interfaces
+ between RAUC and hawkBit's DDI API. 
