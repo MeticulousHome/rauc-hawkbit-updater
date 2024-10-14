@@ -96,6 +96,7 @@ GQuark rhu_hawkbit_client_http_error_quark(void)
 struct progress{
         GDBusConnection *connection;
         gchar *object_path;
+        curl_off_t resume_from;
 };
 
 static size_t progress_callback(void *clientp,
@@ -104,15 +105,24 @@ static size_t progress_callback(void *clientp,
                                 curl_off_t ultotal,
                                 curl_off_t ulnow)
 {
+        struct progress *prog = (struct progress *)clientp;
         static double last_percentage = 0;
-        double percentage = (dltotal > 0) ? ((double)dlnow / (double)dltotal) * 100 : 0;
+        curl_off_t total_size = prog->resume_from + dltotal;
+        curl_off_t current_size = prog->resume_from + dlnow;
+    
+        double percentage;
+        if (total_size > 0 && dltotal > 0) {
+                percentage = ((double)current_size / (double)total_size) * 100;
+        } else {
+                percentage = 0;
+        }
 
         if (fabs(percentage - last_percentage) >= 1.0) {
                 if (dbus_interface) {
                         download_progress_download_progress_emit_progress_update(dbus_interface, percentage);
                 }
                 g_print("Download progress: %.1f%%\n", percentage);
-        
+    
                 last_percentage = percentage;
         }
 
@@ -453,6 +463,8 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
                 curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, resume_from);
                 g_debug("Setting CURLOPT_RESUME_FROM_LARGE to %" CURL_FORMAT_CURL_OFF_T, resume_from);
         }
+
+        prog.resume_from = resume_from;
 
         curl_easy_setopt(curl, CURLOPT_URL, download_url);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
