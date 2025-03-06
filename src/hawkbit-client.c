@@ -1436,10 +1436,73 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
                 GStatBuf file_stat;
                 if (g_stat(hawkbit_config->bundle_download_location, &file_stat) == 0) {
                         if (file_stat.st_size == artifact->size) {
+                                struct on_new_software_userdata userdata = {
+                                        .install_progress_callback = (GSourceFunc) hawkbit_progress,
+                                        .install_complete_callback = install_complete_cb,
+                                        .file = hawkbit_config->bundle_download_location,
+                                        .auth_header = NULL,
+                                        .ssl_verify = hawkbit_config->ssl_verify,
+                                        .install_success = FALSE,
+                                };
+
+                                FILE *fp = NULL;
+                                g_autofree gchar *calculated_sha1sum = NULL;
+                                gchar **calculated_sha = NULL;
+                                gsize file_size = 0;
                                 g_debug("File already fully downloaded. Skipping download.");
-                                // Here you might want to verify the checksum of the existing file
-                                // If checksum is valid, you can proceed to installation
-                                // If not, you should delete the file and start a new download
+                                g_clear_pointer(&calculated_sha1sum, g_free);
+                                calculated_sha = &calculated_sha1sum;
+                                g_return_val_if_fail(calculated_sha && *calculated_sha == NULL, FALSE);
+
+
+                                // Reopen the file for checksum calculation
+                                fp = g_fopen(userdata.file, "rb");
+                                if (!fp) {
+                                        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                                        "Failed to open %s for checksum calculation: %s", file, g_strerror(errno));
+                                        return FALSE;
+                                }
+
+                                // Get the file size
+                                fseek(fp, 0, SEEK_END);
+                                file_size = ftell(fp);
+                                fseek(fp, 0, SEEK_SET);
+
+                                g_debug("Calculating checksum for entire file. Size: %zu bytes", file_size);
+
+                                // Calculate checksum for the entire file
+                                if (!get_file_checksum(fp, G_CHECKSUM_SHA1, calculated_sha, file_size, error)) {
+                                        fclose(fp);
+                                        process_deployment_cleanup();
+                                        return FALSE;
+                                }
+
+                                fclose(fp);
+
+                                if (artifact->sha1 && g_strcmp0(*calculated_sha, artifact->sha1) != 0) {
+                                        g_set_error(error, RHU_HAWKBIT_CLIENT_ERROR, RHU_HAWKBIT_CLIENT_ERROR_CHECKSUM,
+                                                "Checksum mismatch. Expected: %s, Calculated: %s",
+                                                artifact->sha1, *calculated_sha);
+                                        process_deployment_cleanup();
+                                        return FALSE;
+                                }
+                                g_debug("Checksum valid, installing");
+
+                                active_action->state = ACTION_STATE_INSTALLING;
+                                g_cond_signal(&active_action->cond);
+                                g_mutex_unlock(&active_action->mutex);
+
+                                software_ready_cb(&userdata);
+
+                                g_mutex_lock(&active_action->mutex);
+
+                                if (!userdata.install_success) {
+                                        g_set_error(error, RHU_HAWKBIT_CLIENT_ERROR,
+                                                RHU_HAWKBIT_CLIENT_ERROR_STREAM_INSTALL,
+                                                "Streaming installation failed");
+                                        return FALSE;
+                                }
+
                                 return TRUE;
                         } else if (file_stat.st_size > 0) {
                                 g_debug("Partial download found. Will resume from byte %" G_GOFFSET_FORMAT, 
