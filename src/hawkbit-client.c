@@ -1499,7 +1499,8 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
                                 if (!userdata.install_success) {
                                         g_set_error(error, RHU_HAWKBIT_CLIENT_ERROR,
                                                 RHU_HAWKBIT_CLIENT_ERROR_STREAM_INSTALL,
-                                                "Streaming installation failed");
+                                                "Installation failed");
+                                        process_deployment_cleanup();
                                         return FALSE;
                                 }
 
