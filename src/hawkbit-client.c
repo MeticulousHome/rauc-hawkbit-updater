@@ -1471,7 +1471,7 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
                                 fp = g_fopen(userdata.file, "rb");
                                 if (!fp) {
                                         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
-                                        "Failed to open %s for checksum calculation: %s", file, g_strerror(errno));
+                                        "Failed to open %s for checksum calculation: %s", userdata.file, g_strerror(errno));
                                         return FALSE;
                                 }
 
