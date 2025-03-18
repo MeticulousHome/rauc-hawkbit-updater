@@ -81,6 +81,7 @@ static CURLSH *curl_share = NULL;
 static GMutex curl_share_locks[CURL_LOCK_DATA_LAST + 1];
 
 static void process_deployment_cleanup(void);
+static gboolean feedback_progress(const gchar *url, const gchar *id, const gchar *detail, GError **error);
 
 GQuark rhu_hawkbit_client_error_quark(void)
 {
@@ -116,7 +117,23 @@ struct progress{
         GDBusConnection *connection;
         gchar *object_path;
         curl_off_t resume_from;
+        gchar *feedback_url;
+        gchar *action_id;
 };
+
+static gboolean report_download_progress(const gchar *feedback_url, const gchar *action_id,
+                                         double percentage, GError **error)
+{
+        g_autofree gchar *msg = NULL;
+
+        g_return_val_if_fail(feedback_url, FALSE);
+        g_return_val_if_fail(action_id, FALSE);
+        g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
+        msg = g_strdup_printf("Download progress: %.1f%%", percentage);
+
+        return feedback_progress(feedback_url, action_id, msg, error);
+}
 
 static size_t progress_callback(void *clientp,
                                 curl_off_t dltotal,
@@ -128,7 +145,7 @@ static size_t progress_callback(void *clientp,
         static double last_percentage = 0;
         curl_off_t total_size = prog->resume_from + dltotal;
         curl_off_t current_size = prog->resume_from + dlnow;
-    
+
         double percentage;
         if (total_size > 0 && dltotal > 0) {
                 percentage = ((double)current_size / (double)total_size) * 100;
@@ -141,6 +158,15 @@ static size_t progress_callback(void *clientp,
                         download_progress_download_progress_emit_progress_update(dbus_interface, percentage);
                 }
                 g_print("Download progress: %.1f%%\n", percentage);
+
+                if (prog->feedback_url && prog->action_id) {
+                        GError *error = NULL;
+                        if (!report_download_progress(prog->feedback_url, prog->action_id, percentage, &error)) {
+                                g_warning("Failed to report download progress: %s", error->message);
+                                g_clear_error(&error);
+                        }
+                }
+
                 last_percentage = percentage;
         }
 
@@ -245,7 +271,7 @@ static gboolean get_file_checksum(FILE *fp, const GChecksumType type, gchar **ch
         g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
         g_return_val_if_fail(fp, FALSE);
         g_return_val_if_fail(checksum && *checksum == NULL, FALSE);
-        
+
         g_assert_nonnull(ctx);
 
         // Save the initial file position
@@ -461,7 +487,9 @@ static void set_default_curl_opts(CURL *curl)
  * @return TRUE if download succeeded, FALSE otherwise (error set)
  */
 static gboolean get_binary(const gchar *download_url, const gchar *file, curl_off_t resume_from,
-                           const gchar *expected_sha1sum, gchar **calculated_sha1sum, curl_off_t *speed, GError **error)
+                           const gchar *expected_sha1sum, gchar **calculated_sha1sum,
+                           curl_off_t *speed, const gchar *feedback_url, const gchar *action_id,
+                           GError **error)
 {
         g_autoptr(CURL) curl = NULL;
         FILE *fp = NULL;
@@ -474,9 +502,14 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         prog.connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, error);
         if(prog.connection == NULL){
+                g_free(prog.feedback_url);
+                g_free(prog.action_id);
                 return FALSE;
         }
         prog.object_path = "/org/hawkbit/DownloadProgress";
+        prog.resume_from = resume_from;
+        prog.feedback_url = g_strdup(feedback_url);
+        prog.action_id = g_strdup(action_id);
 
         g_return_val_if_fail(download_url, FALSE);
         g_return_val_if_fail(file, FALSE);
@@ -530,7 +563,7 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         if (resume_from > 0) {
                 if (fseek(fp, resume_from, SEEK_SET) != 0) {
                         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
-                                "Failed to seek to position %" CURL_FORMAT_CURL_OFF_T ": %s", 
+                                "Failed to seek to position %" CURL_FORMAT_CURL_OFF_T ": %s",
                                 resume_from, g_strerror(errno));
                         fclose(fp);
                         return FALSE;
@@ -599,6 +632,11 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
         if (http_code != 200 && http_code != 206 && http_code != 416) {
                 g_set_error(error, RHU_HAWKBIT_CLIENT_HTTP_ERROR, http_code,
                 "HTTP request failed: %ld", http_code);
+
+                g_free(prog.feedback_url);
+                g_free(prog.action_id);
+                g_object_unref(prog.connection);
+
                 fclose(fp);
                 return FALSE;
         }
@@ -643,6 +681,8 @@ static gboolean get_binary(const gchar *download_url, const gchar *file, curl_of
 
         g_debug("Download and checksum verification completed successfully.");
         g_debug("Calculated SHA1: %s", *calculated_sha1sum);
+        g_free(prog.feedback_url);
+        g_free(prog.action_id);
         g_object_unref(prog.connection);
         return TRUE;
 }
@@ -1188,7 +1228,8 @@ static gpointer download_thread(gpointer data)
                         resume_from = 0;
                 }
                 if (get_binary(artifact->download_url, hawkbit_config->bundle_download_location,
-                               resume_from, artifact->sha1, &calculated_sha1sum, &speed, &error))
+                               resume_from, artifact->sha1, &calculated_sha1sum, &speed,
+                               artifact->feedback_url, active_action->id, &error))
                         break;
 
                 for (const gint *code = &resumable_codes[0]; *code; code++)
@@ -1612,7 +1653,7 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
 
                                 return TRUE;
                         } else if (file_stat.st_size > 0) {
-                                g_debug("Partial download found. Will resume from byte %" G_GOFFSET_FORMAT, 
+                                g_debug("Partial download found. Will resume from byte %" G_GOFFSET_FORMAT,
                                         (goffset)file_stat.st_size);
                         }
                 }
