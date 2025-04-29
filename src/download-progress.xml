@@ -4,5 +4,9 @@
     <signal name="ProgressUpdate">
       <arg name="percentage" type="d"/>
     </signal>
+    <signal name="Error">
+      <arg name="process" type="s"/>
+      <arg name="error" type="s"/>
+    </signal>
   </interface>
 </node>
