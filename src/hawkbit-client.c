@@ -1231,6 +1231,10 @@ report_err:
 
         active_action->state = ACTION_STATE_ERROR;
 
+        if (dbus_interface) {
+                download_progress_download_progress_emit_error(dbus_interface, "EDOWNLOAD", error->message);
+        }
+
 cancel:
         if (active_action->state == ACTION_STATE_CANCEL_REQUESTED)
                 active_action->state = ACTION_STATE_CANCELED;
@@ -1574,6 +1578,10 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
 
 proc_error:
         feedback(artifact->feedback_url, active_action->id, (*error)->message, "failure", "closed", NULL);
+
+        if (dbus_interface) {
+                download_progress_download_progress_emit_error(dbus_interface, "EPRODEP" ,(*error)->message);
+        }
 
 error:
         // clean up failed deployment
