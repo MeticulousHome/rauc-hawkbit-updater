@@ -1462,17 +1462,6 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
         if (hawkbit_config->stream_bundle)
                 return start_streaming_installation(artifact, error);
 
-        // check if there is enough free diskspace
-        if (!get_available_space(hawkbit_config->bundle_download_location, &freespace, error))
-                goto proc_error;
-
-        if (freespace < artifact->size) {
-                // notify hawkbit that there is not enough free space
-                g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_NOSPC,
-                            "File size %" G_GINT64_FORMAT " exceeds available space %" G_GOFFSET_FORMAT,
-                            artifact->size, freespace);
-                goto proc_error;
-        }
 
         // Check if a download is already in progress
         if (thread_download) {
@@ -1487,7 +1476,12 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
                 }
         }
 
+        // check if there is enough free diskspace
+        if (!get_available_space(hawkbit_config->bundle_download_location, &freespace, error))
+                goto proc_error;
+
         // Check if the file already exists and is complete
+        unsigned long int partial_download_size = 0;
         {
                 GStatBuf file_stat;
                 if (g_stat(hawkbit_config->bundle_download_location, &file_stat) == 0) {
@@ -1562,10 +1556,19 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
 
                                 return TRUE;
                         } else if (file_stat.st_size > 0) {
+                                partial_download_size = file_stat.st_size;
                                 g_debug("Partial download found. Will resume from byte %" G_GOFFSET_FORMAT, 
                                         (goffset)file_stat.st_size);
                         }
                 }
+        }
+
+        if (freespace + partial_download_size < artifact->size) { // take into account partial download size
+                // notify hawkbit that there is not enough free space
+                g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_NOSPC,
+                            "File size %" G_GINT64_FORMAT " exceeds available space %" G_GOFFSET_FORMAT,
+                            artifact->size, freespace);
+                goto proc_error;
         }
 
         // Start new download thread
