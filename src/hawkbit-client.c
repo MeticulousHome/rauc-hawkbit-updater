@@ -79,6 +79,12 @@ static GThread *thread_download = NULL;
 static void process_deployment_cleanup(void);
 static gboolean feedback_progress(const gchar *url, const gchar *id, const gchar *detail, GError **error);
 
+const unsigned short HAWKBIT_MAX_RETRIES = 3;
+
+static unsigned short proc_deployment_failures = 0;
+static unsigned short dwnld_deployment_tries = 0;
+
+
 GQuark rhu_hawkbit_client_error_quark(void)
 {
         return g_quark_from_static_string("rhu_hawkbit_client_error_quark");
@@ -1191,6 +1197,7 @@ static gpointer download_thread(gpointer data)
                         g_warning("%s", feedback_error->message);
 
                 g_mutex_unlock(&active_action->mutex);
+                dwnld_deployment_tries=0;
                 return GINT_TO_POINTER(TRUE);
         }
         if (!feedback_progress(artifact->feedback_url, active_action->id, "File checksum OK.",
@@ -1210,7 +1217,7 @@ static gpointer download_thread(gpointer data)
         if (!artifact->do_install) {
                 active_action->state = ACTION_STATE_NONE;
                 g_mutex_unlock(&active_action->mutex);
-
+                dwnld_deployment_tries=0;
                 return GINT_TO_POINTER(TRUE);
         }
 
@@ -1220,14 +1227,20 @@ static gpointer download_thread(gpointer data)
         g_mutex_unlock(&active_action->mutex);
 
         software_ready_cb(&userdata);
-
+        dwnld_deployment_tries = 0;
         return GINT_TO_POINTER(userdata.install_success);
 
 report_err:
         g_mutex_lock(&active_action->mutex);
-        if (!feedback(artifact->feedback_url, active_action->id, error->message, "failure",
-                      "closed", &feedback_error))
-                g_warning("%s", feedback_error->message);
+        if(++dwnld_deployment_tries >= HAWKBIT_MAX_RETRIES){
+                dwnld_deployment_tries = 0;
+                if (!feedback(artifact->feedback_url, active_action->id, error->message, "failure",
+                              "closed", &feedback_error)){
+                        g_warning("%s", feedback_error->message);
+                        if(dbus_interface)
+                                download_progress_download_progress_emit_error(dbus_interface, "ENOTIFY", feedback_error->message);    
+                }
+        }
 
         active_action->state = ACTION_STATE_ERROR;
 
@@ -1361,6 +1374,7 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
                 g_message("hawkBit requested to skip download, not downloading yet%s.",
                           maintenance_msg);
                 active_action->state = ACTION_STATE_NONE;
+                proc_deployment_failures = 0;
                 return TRUE;
         }
 
@@ -1380,6 +1394,7 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
         if (!artifact->do_install && !g_strcmp0(temp_id, active_action->id)) {
                 g_debug("Deployment %s is still waiting%s.", active_action->id, maintenance_msg);
                 active_action->state = ACTION_STATE_NONE;
+                proc_deployment_failures = 0;
                 return TRUE;
         }
 
@@ -1468,6 +1483,7 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
                 g_debug("Download thread already exists.");
                 if (active_action->state == ACTION_STATE_DOWNLOADING) {
                         g_debug("Download is still in progress. Not starting a new one.");
+                        proc_deployment_failures = 0;
                         return TRUE;
                 } else {
                         g_debug("Previous download thread has finished. Cleaning up.");
@@ -1553,7 +1569,7 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
                                         process_deployment_cleanup();
                                         return FALSE;
                                 }
-
+                                proc_deployment_failures = 0;
                                 return TRUE;
                         } else if (file_stat.st_size > 0) {
                                 partial_download_size = file_stat.st_size;
@@ -1577,16 +1593,20 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
         thread_download = g_thread_new("downloader", download_thread,
                                        (gpointer) g_steal_pointer(&artifact));
 
+        proc_deployment_failures = 0;
         return TRUE;
 
 proc_error:
-        feedback(artifact->feedback_url, active_action->id, (*error)->message, "failure", "closed", NULL);
-
-        if (dbus_interface) {
-                download_progress_download_progress_emit_error(dbus_interface, "EPRODEP" ,(*error)->message);
+        // allow us to keep requesting deployment information for at most 3 times, in case the error got solved
+        if(++proc_deployment_failures >= HAWKBIT_MAX_RETRIES){
+                feedback(artifact->feedback_url, active_action->id, (*error)->message, "failure", "closed", NULL);
+                proc_deployment_failures = 0;
         }
 
 error:
+        if (dbus_interface) {
+                download_progress_download_progress_emit_error(dbus_interface, "EPRODEP" ,(*error)->message);
+        }
         // clean up failed deployment
         //process_deployment_cleanup();
         active_action->state = ACTION_STATE_NONE;
