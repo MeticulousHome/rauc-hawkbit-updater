@@ -1232,7 +1232,9 @@ static gpointer download_thread(gpointer data)
 
 report_err:
         g_mutex_lock(&active_action->mutex);
+        g_warning("ERROR: download deployment fails: [%d]\n", dwnld_deployment_tries+1);
         if(++dwnld_deployment_tries >= HAWKBIT_MAX_RETRIES){
+                g_warning("ERROR: 3 download fails in a row, sending feedback to server");
                 dwnld_deployment_tries = 0;
                 if (!feedback(artifact->feedback_url, active_action->id, error->message, "failure",
                               "closed", &feedback_error)){
@@ -1241,6 +1243,8 @@ report_err:
                                 download_progress_download_progress_emit_error(dbus_interface, "ENOTIFY", feedback_error->message);    
                 }
         }
+        // As the download has failed if we download it, lets start from scratch
+        process_deployment_cleanup();
 
         active_action->state = ACTION_STATE_ERROR;
 
@@ -1598,7 +1602,9 @@ static gboolean process_deployment(JsonNode *req_root, GError **error)
 
 proc_error:
         // allow us to keep requesting deployment information for at most 3 times, in case the error got solved
+        g_warning("ERROR: deployment processing fails [%d]\n", proc_deployment_failures+1);
         if(++proc_deployment_failures >= HAWKBIT_MAX_RETRIES){
+                g_warning("ERROR: 3 proc_deployment_fails in a row, sending feedback");
                 feedback(artifact->feedback_url, active_action->id, (*error)->message, "failure", "closed", NULL);
                 proc_deployment_failures = 0;
         }
