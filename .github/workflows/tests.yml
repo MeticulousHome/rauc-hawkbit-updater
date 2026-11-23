@@ -4,7 +4,7 @@ on: [push, pull_request, workflow_dispatch]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: [Linux, x64, office, self-hosted]
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +67,7 @@ jobs:
         ASAN_OPTIONS=fast_unwind_on_malloc=0 dbus-run-session -- pytest -v
 
   docs:
-    runs-on: ubuntu-latest
+    runs-on: [Linux, x64, office, self-hosted]
     steps:
     - uses: actions/checkout@v3
 
@@ -83,7 +83,7 @@ jobs:
         ninja -C build doxygen
 
   uncrustify:
-    runs-on: ubuntu-latest
+    runs-on: [Linux, x64, office, self-hosted]
     steps:
     - uses: actions/checkout@v3
 
