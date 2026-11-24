@@ -11,7 +11,7 @@ on:
 jobs:
   analyze:
     name: Analyze
-    runs-on: [Linux, x64, office, self-hosted]
+    runs-on: ${{ fromJSON(vars.OFFICE_RUNNERS == 'on' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","x64","office"]' || '"ubuntu-latest"') }}
     permissions:
       actions: read
       contents: read
