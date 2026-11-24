@@ -1,10 +1,15 @@
 name: tests
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    # Branches only: image builds push a tag to every component repository.
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: [Linux, x64, office, self-hosted]
+    runs-on: ${{ fromJSON(vars.OFFICE_RUNNERS == 'on' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","x64","office"]' || '"ubuntu-latest"') }}
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +72,7 @@ jobs:
         ASAN_OPTIONS=fast_unwind_on_malloc=0 dbus-run-session -- pytest -v
 
   docs:
-    runs-on: [Linux, x64, office, self-hosted]
+    runs-on: ${{ fromJSON(vars.OFFICE_RUNNERS == 'on' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","x64","office"]' || '"ubuntu-latest"') }}
     steps:
     - uses: actions/checkout@v3
 
@@ -83,7 +88,7 @@ jobs:
         ninja -C build doxygen
 
   uncrustify:
-    runs-on: [Linux, x64, office, self-hosted]
+    runs-on: ${{ fromJSON(vars.OFFICE_RUNNERS == 'on' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","x64","office"]' || '"ubuntu-latest"') }}
     steps:
     - uses: actions/checkout@v3
 
